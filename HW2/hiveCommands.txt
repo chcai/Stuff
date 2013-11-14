@@ -1,0 +1,17 @@
+#################
+# hive commands #
+#################
+
+create table groupies(groups int, value double)
+row format delimited fields terminated by '\t'
+lines terminated by '\n';
+
+load data local inpath './groups.txt' into table groupies;
+
+insert overwrite local directory './results'
+select avg(value) from groupies
+group by groups;
+
+insert overwrite local directory './results2'
+select var_samp(value) from groupies
+group by groups;
