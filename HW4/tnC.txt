@@ -1,0 +1,109 @@
+// kernel for sampling from truncated normal distribution
+
+// import libraries
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda.h>
+#include <curand_kernel.h>
+#include <math_constants.h>
+
+// wrapper for RCUDA
+extern "C"
+{
+
+// kernel to sample truncated normals
+// void means does not return anything
+__global__ void
+tn_kernel(float *x, // vector to store samples; * means this is a pointer
+          int n, // length of x
+          float *mu, // vector of mean params for the tn distr
+          float *sig, // vector of standard deviation params
+          float *a, // vector of lower truncations
+          float *b, // vector of upper truncations
+          int rng_c, // for initializing seed
+          int maxtries // max tries before going to Robert case
+          )
+  {
+    int myblock = blockIdx.x + blockIdx.y * gridDim.x;
+    int blocksize = blockDim.x * blockDim.y * blockDim.z;
+    int subthread = threadIdx.z*(blockDim.x * blockDim.y) + threadIdx.y*blockDim.x + threadIdx.x;
+    int idx = myblock * blocksize + subthread;
+
+    // initialize seed
+    curandState rng;
+    curand_init(9131+idx*17, rng_c, 0, &rng);
+
+    // number of threads > n
+    // check if index is valid; i.e. 0:(n-1)
+    if(idx < n)
+    {
+      // accepted = false
+      int accepted = 0;
+      int tries = 0;
+
+      while(!accepted && tries < maxtries)
+      {
+        // curand_normal() samples a N(0,1)
+        // sample a N(mu, sig) with correct indices
+        float tmp = mu[idx]+sig[idx]*curand_normal(&rng);
+        // check if within truncation
+        // if it is, accepted = true
+        // else try again
+        if(tmp > a[idx] && tmp < b[idx])
+        {
+          x[idx] = tmp;
+          accepted = 1;
+        }
+        tries += 1;
+      }
+
+      // if max tries is reached above but still no sample
+      // enter this Robert case while loop
+      // only accounts for one sided truncation
+      // i.e. (0, inf)
+      while(!accepted)
+      {
+        float mu_;
+        float alpha;
+        float z;
+        float psi;
+
+        // check which side the truncation is
+        // and define mu_ and alpha accordingly
+        // theory is given in Robert (2009)
+        if(a[idx] > mu[idx])
+        {
+          mu_ = (a[idx]-mu[idx])/sig[idx];
+          alpha = (mu_+sqrt(mu_*mu_+4))/2;
+        }
+        if(b[idx] < mu[idx])
+        {
+          mu_ = (b[idx]-mu[idx])/sig[idx];
+          alpha = (mu_-sqrt(mu_*mu_+4))/2;
+        }
+
+        // theory is given in Robert (2009)
+        z = mu_-logf(curand_uniform(&rng))/alpha;
+        if(mu_ < alpha)
+        {
+          psi = expf(-(alpha-z)*(alpha-z)/2);
+        }
+        if(mu_ >= alpha)
+        {
+          psi = expf(-(mu_-alpha)*(mu_-alpha)/2)*expf(-(alpha-z)*(alpha-z)/2);
+        }
+        // if U ~ U(0,1) < psi, accept z as sample
+        // else try again
+        if(curand_uniform(&rng) < psi)
+        {
+          x[idx] = z;
+          accepted = 1;
+        }
+      }
+
+    }
+    // returns nothing
+    return;
+  }
+
+} // end RCUDA wrapper
